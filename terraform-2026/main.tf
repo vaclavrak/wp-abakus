@@ -87,8 +87,8 @@ resource "google_compute_firewall" "wordpress_http" {
   target_tags   = ["wp-abakus-2026"]
 }
 
-resource "google_compute_firewall" "wordpress_ssh" {
-  name    = "wp-abakus-2026-allow-ssh"
+resource "google_compute_firewall" "wordpress_ssh_ipv4" {
+  name    = "wp-abakus-2026-allow-ssh-ipv4"
   network = "default"
 
   allow {
@@ -96,7 +96,20 @@ resource "google_compute_firewall" "wordpress_ssh" {
     ports    = ["22"]
   }
 
-  source_ranges = ["0.0.0.0/0"]
+  source_ranges = ["89.248.248.178/32"]
+  target_tags   = ["wp-abakus-2026"]
+}
+
+resource "google_compute_firewall" "wordpress_ssh_ipv6" {
+  name    = "wp-abakus-2026-allow-ssh-ipv6"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+
+  source_ranges = ["2a01:168:3118:150::/64"]
   target_tags   = ["wp-abakus-2026"]
 }
 
@@ -106,7 +119,7 @@ resource "google_compute_firewall" "wordpress_ssh" {
 
 resource "google_compute_instance" "wordpress" {
   name         = var.vm_name
-  machine_type = "e2-small"
+  machine_type = "e2-medium"
   zone         = var.zone
 
   tags = ["wp-abakus-2026"]
@@ -229,6 +242,20 @@ resource "google_compute_disk_resource_policy_attachment" "weekly" {
 # MONITORING & ALERTS
 # ===========================================
 
+resource "google_monitoring_notification_channel" "slack" {
+  display_name = "GCP Abakus monitoring"
+  type         = "slack"
+  project      = var.project_id
+
+  labels = {
+    channel_name = "#monitoring"
+  }
+
+  lifecycle {
+    ignore_changes = [labels]
+  }
+}
+
 resource "google_monitoring_notification_channel" "email" {
   display_name = "WordPress Production Alerts"
   type         = "email"
@@ -320,12 +347,168 @@ resource "google_monitoring_alert_policy" "uptime" {
 
   notification_channels = [
     google_monitoring_notification_channel.sms.id,
-    google_monitoring_notification_channel.email.id
+    google_monitoring_notification_channel.email.id,
+    google_monitoring_notification_channel.slack.id,
   ]
 
   alert_strategy {
     auto_close = "604800s"
   }
+}
+
+resource "google_monitoring_alert_policy" "ssl_cert" {
+  display_name = "SSL Certificate Failing - ${var.domain}"
+  project      = var.project_id
+  combiner     = "OR"
+
+  conditions {
+    display_name = "SSL cert check failing"
+
+    condition_threshold {
+      filter          = "resource.type = \"uptime_url\" AND metric.type = \"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.labels.check_id = \"${google_monitoring_uptime_check_config.ssl_cert.uptime_check_id}\""
+      duration        = "300s"
+      comparison      = "COMPARISON_LT"
+      threshold_value = 1
+
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_NEXT_OLDER"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [
+    google_monitoring_notification_channel.sms.id,
+    google_monitoring_notification_channel.email.id,
+    google_monitoring_notification_channel.slack.id,
+  ]
+
+  alert_strategy {
+    auto_close = "604800s"
+  }
+}
+
+# ===========================================
+# VM HEALTH MONITORING
+# ===========================================
+
+resource "google_monitoring_alert_policy" "cpu_high" {
+  display_name = "VM CPU High - ${var.vm_name}"
+  project      = var.project_id
+  combiner     = "OR"
+
+  conditions {
+    display_name = "CPU utilization > 80% for 5 min"
+
+    condition_threshold {
+      filter          = "resource.type = \"gce_instance\" AND resource.labels.instance_id = \"${google_compute_instance.wordpress.instance_id}\" AND metric.type = \"compute.googleapis.com/instance/cpu/utilization\""
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0.8
+
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MEAN"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [
+    google_monitoring_notification_channel.email.id,
+    google_monitoring_notification_channel.slack.id,
+  ]
+
+  alert_strategy {
+    auto_close = "604800s"
+  }
+}
+
+resource "google_monitoring_alert_policy" "memory_high" {
+  display_name = "VM Memory High - ${var.vm_name}"
+  project      = var.project_id
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Memory utilization > 85% for 5 min"
+
+    condition_threshold {
+      filter          = "resource.type = \"gce_instance\" AND resource.labels.instance_id = \"${google_compute_instance.wordpress.instance_id}\" AND metric.type = \"agent.googleapis.com/memory/percent_used\" AND metric.labels.state = \"used\""
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 85
+
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MEAN"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [
+    google_monitoring_notification_channel.email.id,
+    google_monitoring_notification_channel.slack.id,
+  ]
+
+  alert_strategy {
+    auto_close = "604800s"
+  }
+}
+
+resource "google_monitoring_alert_policy" "disk_high" {
+  display_name = "VM Disk Full - ${var.vm_name}"
+  project      = var.project_id
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Disk utilization > 85%"
+
+    condition_threshold {
+      filter          = "resource.type = \"gce_instance\" AND resource.labels.instance_id = \"${google_compute_instance.wordpress.instance_id}\" AND metric.type = \"agent.googleapis.com/disk/percent_used\" AND metric.labels.state = \"used\" AND metric.labels.device = \"/dev/root\""
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 85
+
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MEAN"
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+
+  notification_channels = [
+    google_monitoring_notification_channel.sms.id,
+    google_monitoring_notification_channel.email.id,
+    google_monitoring_notification_channel.slack.id,
+  ]
+
+  alert_strategy {
+    auto_close = "604800s"
+  }
+}
+
+# ===========================================
+# MONITORING DASHBOARD
+# ===========================================
+
+resource "google_monitoring_dashboard" "wordpress" {
+  project        = var.project_id
+  dashboard_json = file("${path.module}/dashboard.json")
 }
 
 # ===========================================
@@ -463,4 +646,9 @@ output "dns_record" {
 output "monitoring_dashboard" {
   value       = "https://console.cloud.google.com/monitoring/dashboards?project=${var.project_id}"
   description = "GCP Monitoring Dashboard"
+}
+
+output "dashboard_id" {
+  value       = google_monitoring_dashboard.wordpress.id
+  description = "Monitoring dashboard resource ID"
 }
